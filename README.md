@@ -19,7 +19,8 @@ This version supports:
 
 ### OPTIONS
 
-    rfr.pl [options] [file ...]
+    rfr.pl [options] file ...
+    rfr.pl [options] -s|--session <path>
 
     Options:
     -b, --base	<path>		Base directory to look for data files
@@ -33,6 +34,7 @@ This version supports:
     -s, --session <path>	resume all torrents in rtorrent session directory under <path>
     -u, --unfinished		check for missing files and resume partialy downloaded torrent
     -v, --verbose		be more verbose about what's going on there
+    -c, --coerce                serialize (\d+) strings as integers (may corrupt torrents with digits-only directory/file names, like '\dir\123\name\somefile' )
 
     [file]			torrent file to resume
 

@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 # Perl script to add rTorrent fast resume data to torrent files.
 #
@@ -14,8 +14,7 @@ use File::Basename;
 use Data::Dumper;
 use Pod::Usage;
 
-
-my $VERSION = "1.0";
+my $VERSION = "1.0.1";
 
 #var for torrent data
 my $tdata;
@@ -41,10 +40,11 @@ GetOptions(\%opt,
 	    'session|s=s',
 	    'unfinished|u',
 	    'verbose|v',
+	    'coerce|c',
 	    '<>' => \&do_torrent) or &help();
 
 
-&init();
+&help() unless %opt;
 
 &fix_session($opt{'session'}) if $opt{'session'};
 
@@ -52,7 +52,7 @@ sub help {
     my $verb = shift;
     print "\nrfr.pl - an rtorrent fast resumer, version $VERSION\n\n";
 
-    $verb ? pod2usage(-noperldoc=>1, -verbose => 2) : pod2usage(1);
+    $verb ? pod2usage(-noperldoc=>1, -verbose => 2, -exitval => 0) : pod2usage(1);
     exit(1);
 }
 
@@ -62,6 +62,8 @@ sub init {
     $opt{'verbose'} = 1 if $debug;
 
     print STDERR (join("|",@ARGV),"\n") if $opt{'debug'};
+	# Disable bencode coerce, serialize strings with integers as strings
+    $Convert::Bencode_XS::COERCE = 0 unless $opt{'coerce'};
 }
 
 # process a single torrent
@@ -234,17 +236,16 @@ sub resume{
 
     for (0..$#{$files}) {
 
-	my @fstat = -e "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
+	my @fstat = -f "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
 
 	#print "File size - " . $fstat[7] . "\n";
 	#print "Size is zero\n" if ($fstat[7] == 0);
 
-	unless (     -e "$d${$files}[$_]" &&
-		    $fstat[7] ) {
-		# fixme: partial session support
-		# not $tdata->{'libtorrent_resume'}{'files'}["$_"]{'priority'} ) {
+	unless ( $fstat[7] ) {
+	    # fixme: partial session support
+	    # not $tdata->{'libtorrent_resume'}{'files'}["$_"]{'priority'} ) {
 
-	    print "File $d${$files}[$_]\nnot found or size is 0\n\n" if $opt{'verbose'};
+	    print "File not found or size is 0: $d${$files}[$_]\n" if $opt{'verbose'};
 
 	    # resume fails here if we were not requested to check for missing files
 	    return undef unless $opt{'unfinished'};
@@ -252,14 +253,22 @@ sub resume{
 	    #marks chunks for this file as missing in chunks bitvector
 	    &recalc_bitfield( $boffset, $tdata->{'info'}{'files'}[$_]{'length'} );
 
-	    #touch nonex files
-	    unless ( -e "$d${$files}[$_]" ) {
-		print "Creating zero byte file\n$d${$files}[$_]\n" if $opt{'verbose'};
-		my $mkfile = "touch \"$d${$files}[$_]\"";
-    		my $cmdres = system $mkfile; print $cmdres if $debug;
+            my($filename, $dirpath, $suffix) = fileparse("$d${$files}[$_]");
+
+	    #create nonexistent files
+	    unless ( -s "$d${$files}[$_]" ) {
+		print "Creating zero byte file: $d${$files}[$_]\n\n" if $opt{'verbose'};
+
+		# recreate dir path if missing
+		unless ( -d $dirpath ) {
+			system("mkdir -p \"$dirpath\"" ) == 0 or return undef;
+		}
+
+		open(FILE,">>$d${$files}[$_]") or die "Can't create file $d${$files}[$_]";
+		close(FILE);
 
 		#refresh fstat for the new file
-		@fstat = stat "$d${$files}[$_]";
+		@fstat = stat "$d${$files}[$_]" or return undef;
 	    }
 
 
@@ -455,7 +464,8 @@ This version supports:
 
 =head1 OPTIONS
 
-    rfr.pl [options] [file ...]
+    rfr.pl [options] file ...
+    rfr.pl [options] -s|--session <path>
 
     Options:
     -b, --base	<path>		Base directory to look for data files
@@ -469,6 +479,7 @@ This version supports:
     -s, --session <path>	resume all torrents in rtorrent session directory under <path>
     -u, --unfinished		check for missing files and resume partialy downloaded torrent
     -v, --verbose		be more verbose about what's going on there
+    -c, --coerce		serialize (\d+) strings as integers (may corrupt torrents with digits-only directory/file names, like '\dir\123\name\somefile' )
 
     [file]			torrent file to resume
 
