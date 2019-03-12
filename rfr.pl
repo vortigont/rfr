@@ -16,7 +16,7 @@ use File::Path qw(make_path);
 use Data::Dumper;
 use Pod::Usage;
 
-my $VERSION = "1.0.1";
+my $VERSION = "1.0.2";
 
 #var for torrent data
 my $tdata;
@@ -90,8 +90,10 @@ sub do_torrent {
 		return undef;
     }
 
-	print "Dumping resumed torrent structure:\n" if $debug;
-    print Dumper ($tdata) if $debug;
+	#print "Dumping resumed torrent structure:\n" if $debug;
+    #print Dumper ($tdata) if $debug;
+	print "Dumping resumed torrent structure:\n" if $opt{'verbose'};
+	print Dumper ($tdata) if $opt{'verbose'};
 
     # save to the sourse file if destination is not set
     $opt{'destination'} = $tfile unless $opt{'destination'};
@@ -183,8 +185,11 @@ sub load_file {
     close(FP);
 
     print "Torrent $data->{'info'}{'name'}\n" if (defined $data->{'info'}{'name'} && $opt{'verbose'});
-	print "Loaded torrent structure:\n" if ($debug);
-    print Dumper($data) if ($debug);
+	#print "Loaded torrent structure:\n" if ($debug);
+    #print Dumper($data) if ($debug);
+	print "Loaded torrent structure:\n" if $opt{'verbose'};
+    print Dumper($data) if $opt{'verbose'};
+
 
     return $data;
 }
