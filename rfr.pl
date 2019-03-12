@@ -63,6 +63,7 @@ sub init {
     $opt{'verbose'} = 1 if $debug;
 
     print STDERR (join("|",@ARGV),"\n") if $debug;
+	$Convert::Bencode_XS::COERCE = 0;
 }
 
 # process a single torrent
@@ -77,7 +78,6 @@ sub do_torrent {
     unless  ( $opt{'base'} ) { print "Base dir (-b option) is a mandatory!\n"; return undef; }
 
     #load torrent file
-	$Convert::Bencode_XS::COERCE = 1;
     $tdata = &load_file($tfile) or return undef;
 
     #check if basepath is valid, contains any data to resume. Set rtorrent directory, so we'll need it later
@@ -85,7 +85,6 @@ sub do_torrent {
 		print "Base path is wrong, aborting...\n"; return undef;
     }
 
-	$Convert::Bencode_XS::COERCE = 0;
     unless ( &resume() ) {
 		print "Something went wrong when resuming $tdata->{'info'}{'name'}\nTry verbose mode to see more info\n";
 		return undef;
@@ -184,8 +183,8 @@ sub load_file {
     close(FP);
 
     print "Torrent $data->{'info'}{'name'}\n" if (defined $data->{'info'}{'name'} && $opt{'verbose'});
-	print "Loaded torrent structure:\n" if ($debug > 1);
-    print Dumper($data) if ($debug > 1);
+	print "Loaded torrent structure:\n" if ($debug);
+    print Dumper($data) if ($debug);
 
     return $data;
 }
