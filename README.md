@@ -26,6 +26,7 @@ This version supports:
     -b, --base	<path>		Base directory to look for data files
     -D, --debug			debug output. WARNING! This will produle a lot of output including bencoded data dump,
 				it's stongly advised to redirect STDOUT to a file, so it will not trash you terminal
+				Specify twice to produce even more debug output, including bitfield vector for each file.
     -d, --destination <path>	destination dir|file to save resumed torrent file
     -h, --help	  		brief help message
     --man        		full documentation
