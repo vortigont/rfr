@@ -45,7 +45,6 @@ GetOptions(\%opt,
 	    'session|s=s',
 	    'unfinished|u',
 	    'verbose|v',
-	    'coerce|c',
 	    '<>' => \&do_torrent) or &help();
 
 
@@ -222,7 +221,7 @@ sub getfiles {
 
     $chunks = &chunks($tsize,$chunk_size);
     print "Total size: $tsize bytes; $chunks chunks; ", @files . " files.\n" if $opt{'verbose'};
-    print "Chunks hash length: " . length $t->{'info'}{'pieces'} if $debug;
+    print "Chunks hash length: " . length $t->{'info'}{'pieces'} . "\n" if $debug;
 
     unless ( $chunks * CHUNK_HASH_SIZE == length $t->{'info'}{'pieces'} ) { print "Inconsistent piece information!\n"; return undef;}
 
@@ -316,12 +315,9 @@ sub resume{
     print "\nResume summary for torrent $tdata->{'info'}{'name'}:\n$chunks_done out of $chunks chunks done\n";
 
     #set some vars in torrent
-	cleanse($chunks);
-	cleanse($chunks_done);
     $tdata->{'rtorrent'}{'chunks_wanted'} = $chunks - $chunks_done;
     $tdata->{'rtorrent'}{'chunks_done'} = $chunks_done;
     $tdata->{'rtorrent'}{'complete'} = ($chunks_done != $chunks) ? 0 : 1;
-	$tdata->{'rtorrent'}{'hashing'} = 0;
     $tdata->{'libtorrent_resume'}{'bitfield'} = $chunks unless ($chunks_done != $chunks);
     return 1;
 }
@@ -360,6 +356,7 @@ sub savetofile {
 
     unless ( open(FP, ">$file") ) { print "Could not open file $file for writing:\n $!"; return undef; }
     print "Saving to file $file\n" if $opt{'verbose'};
+	tclean($data);
     my $content = bencode $data;
 
     binmode(FP);
@@ -397,9 +394,9 @@ sub recalc_bitfield {
 		$bf = unpack("B$chunks", $tdata->{'libtorrent_resume'}{'bitfield'});
     }
 
-    my $missingchunks = &filechunks($offset, $size);
+    my $missingchunks = filechunks($offset, $size);
 
-    print "Chunk offset: &chunks($offset, $chunk_size), missingchunks: $missingchunks\n" if $debug;
+    print "Chunk offset: " . chunks($offset, $chunk_size) . " missingchunks: $missingchunks\n" if $debug;
     substr $bf, &chunks($offset, $chunk_size), $missingchunks, $fill x $missingchunks;
 
 
@@ -425,7 +422,7 @@ sub chunks {
 sub filechunks {
     my ($offset, $size) =@_;
 
-	#one extra byte to offset required to cross chunk boundary
+	#one extra byte to offset is required to cross chunk boundary
 	#one extra chunk is the one where file begins
 	return ( &chunks($offset + $size, $chunk_size) - &chunks($offset + 1, $chunk_size ) + 1 );
 }
@@ -460,6 +457,24 @@ sub chk_basedir {
 sub is_multi {
      return exists $tdata->{'info'}{'files'};
 };
+
+# cleance integers in torrent structure
+sub tclean {
+	my ($d) = @_;
+
+	print "Cleansing file sizes\n" if $debug;
+
+    cleanse($d->{'rtorrent'}{'chunks_wanted'});
+    cleanse($d->{'rtorrent'}{'chunks_done'});
+
+    if ( &is_multi() ) {
+		for (@{$d->{'info'}{'files'}}) {
+			cleanse( $_->{'length'} );
+		}
+    } else {
+		cleanse($d->{'info'}{'length'});
+    }
+}
 
 # no code after this mark
 
@@ -502,7 +517,6 @@ This version supports:
     -s, --session <path>	resume all torrents in rtorrent session directory under <path>
     -u, --unfinished		check for missing files and resume partialy downloaded torrent
     -v, --verbose		be more verbose about what's going on there
-    -c, --coerce		serialize (\d+) strings as integers (may corrupt torrents with digits-only directory/file names, like '\dir\123\name\somefile' )
 
     [file]			torrent file to resume
 
