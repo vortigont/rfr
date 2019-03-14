@@ -9,12 +9,14 @@ use warnings;
 use strict;
 use Getopt::Long 2.25 qw(:config gnu_getopt);
 #use Convert::Bencode qw(bencode bdecode);
-use Convert::Bencode_XS qw(bencode bdecode);
-#use Convert::Bencode_XS qw(:all);
+#use Convert::Bencode_XS qw(bencode bdecode);
+use Convert::Bencode_XS qw(:all);
 use File::Basename;
 use File::Path qw(make_path);
 use Data::Dumper;
 use Pod::Usage;
+
+use constant CHUNK_HASH_SIZE => 20;
 
 my $VERSION = "1.0.2";
 
@@ -23,6 +25,7 @@ my $tdata;
 # chunks in torrent
 my $chunks;
 my $chunks_done;
+my $chunk_size;
 my $tsize;
 my $debug = 0;
 
@@ -199,11 +202,9 @@ sub load_file {
 sub getfiles {
     my $t = shift;
 
-    my $psize;
-
     unless (ref $t eq "HASH" and exists $t->{'info'}) { print "No info key.\n"; return undef; }
 
-    unless ( $psize = $t->{'info'}{'piece length'} ) {print "No piece length key.\n"; return undef; }
+    unless ( $chunk_size = $t->{'info'}{'piece length'} ) {print "No piece length key.\n"; return undef; }
 
     my @files = ();
     $tsize = 0;
@@ -219,10 +220,11 @@ sub getfiles {
 	  $tsize = $t->{'info'}{'length'};
     }
 
-    $chunks = &chunks($tsize,$psize);
+    $chunks = &chunks($tsize,$chunk_size);
     print "Total size: $tsize bytes; $chunks chunks; ", @files . " files.\n" if $opt{'verbose'};
+    print "Chunks hash length: " . length $t->{'info'}{'pieces'} if $debug;
 
-    unless ( $chunks*20 == length $t->{'info'}{'pieces'} ) { print "Inconsistent piece information!\n"; return undef;}
+    unless ( $chunks * CHUNK_HASH_SIZE == length $t->{'info'}{'pieces'} ) { print "Inconsistent piece information!\n"; return undef;}
 
     return \@files;
 }
@@ -288,13 +290,17 @@ sub resume{
         if ( &is_multi() ) {
 	  		$boffset += $tdata->{'info'}{'files'}[$_]{'length'};
 	  		next unless $tdata->{'info'}{'files'}[$_]{'length'} == $fstat[7];
-		} else { 
+		} else {
 	  		$boffset += $tdata->{'info'}{'length'};
 	  		next unless $tdata->{'info'}{'length'} == $fstat[7];
 		}
 
+		$tdata->{'libtorrent_resume'}{'files'}[$_] = {
+			'mtime' => $fstat[9],
+			'completed' => &filechunks($ondisksize, $fstat[7])
+		};
 		$ondisksize += $fstat[7];
-		$tdata->{'libtorrent_resume'}{'files'}[$_] = { 'mtime' => $fstat[9], 'completed' => 1 };
+
     };
 
     # resume failed if ondisk size = 0 (no files to resume actualy) or
@@ -302,17 +308,20 @@ sub resume{
     if ( defined $opt{'unfinished'} && $opt{'unfinished'} != 1 && $ondisksize != $tsize ||  $ondisksize == 0 ) {
 		print "Oops! Files size verification failed\n";
 		print "Either not all files present or nothing to resume at all\n";
-		print "In torrent size = $tsize,\t on-disk size = $ondisksize\n" if $opt{'verbose'};
+		print "In torrent size = $tsize,\t on-disk size = $ondisksize\n";
 		return undef;
     }
 
-    my $chunks_done = &chunks($ondisksize,$tdata->{'info'}{'piece length'});
+    my $chunks_done = &chunks($ondisksize, $chunk_size);
     print "\nResume summary for torrent $tdata->{'info'}{'name'}:\n$chunks_done out of $chunks chunks done\n";
 
     #set some vars in torrent
+	cleanse($chunks);
+	cleanse($chunks_done);
     $tdata->{'rtorrent'}{'chunks_wanted'} = $chunks - $chunks_done;
     $tdata->{'rtorrent'}{'chunks_done'} = $chunks_done;
     $tdata->{'rtorrent'}{'complete'} = ($chunks_done != $chunks) ? 0 : 1;
+	$tdata->{'rtorrent'}{'hashing'} = 0;
     $tdata->{'libtorrent_resume'}{'bitfield'} = $chunks unless ($chunks_done != $chunks);
     return 1;
 }
@@ -388,11 +397,10 @@ sub recalc_bitfield {
 		$bf = unpack("B$chunks", $tdata->{'libtorrent_resume'}{'bitfield'});
     }
 
-    my $blkoffset = &chunks($offset, $tdata->{'info'}{'piece length'}) - 1;
-    my $missingchunks = &chunks($size + $offset, $tdata->{'info'}{'piece length'}) - $blkoffset;
+    my $missingchunks = &filechunks($offset, $size);
 
-    print "Chunk offset: $blkoffset, missingchunks: $missingchunks\n" if $debug;
-    substr $bf, $blkoffset, $missingchunks, $fill x $missingchunks;
+    print "Chunk offset: &chunks($offset, $chunk_size), missingchunks: $missingchunks\n" if $debug;
+    substr $bf, &chunks($offset, $chunk_size), $missingchunks, $fill x $missingchunks;
 
 
     print "BF length - " . length($bf) . "\n" if ($debug > 1);
@@ -403,10 +411,23 @@ sub recalc_bitfield {
     return 1;
 }
 
+# return number of block with size $bsize required
+# to fit specified amount of bytes
 sub chunks {
-    my $length = shift;
-    my $chsize = shift;
-    return int($length / $chsize + 1);
+    my ($length, $bsize) =@_;
+    my $div = int($length / $bsize);
+    $length % $bsize ? return ($div+1) : return $div ;
+}
+
+
+# find how many chunks it needs to fit block of data
+# with size S begining at specified offset F
+sub filechunks {
+    my ($offset, $size) =@_;
+
+	#one extra byte to offset required to cross chunk boundary
+	#one extra chunk is the one where file begins
+	return ( &chunks($offset + $size, $chunk_size) - &chunks($offset + 1, $chunk_size ) + 1 );
 }
 
 #checks the base path so we can find out if there is anything to resume
