@@ -247,6 +247,20 @@ sub resume{
 		my @fstat = -f "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
 
 		#print "On-disk file size - " . $fstat[7] . "\n" if ($debug > 1);
+		#just a precaution, check if file's sizes match
+        if ( is_multi() ) {
+	  		$boffset += $tdata->{'info'}{'files'}[$_]{'length'};
+	  		unless ( $tdata->{'info'}{'files'}[$_]{'length'} == $fstat[7] ){
+				$fstat[7] = 0;
+				print "on-disk file-size doesn't match in-torrent size, reseting resume info\n" if $opt{'verbose'};
+			}
+		} else {
+	  		$boffset += $tdata->{'info'}{'length'};
+	  		unless ( $tdata->{'info'}{'length'} == $fstat[7] ){
+				$fstat[7] = 0;
+				print "on-disk file-size doesn't match in-torrent size, reseting resume info\n" if $opt{'verbose'};
+			}
+		}
 
 		#process non-existent/empty files
 		unless ( $fstat[7] ) {
@@ -278,26 +292,14 @@ sub resume{
 				#refresh fstat for the new file
 				@fstat = stat "$d${$files}[$_]" or return undef;
 			}
-
-
-			$tdata->{'libtorrent_resume'}{'files'}[$_] = { 'mtime' => $fstat[9], 'completed' => 0 };
-			$boffset += $tdata->{'info'}{'files'}[$_]{'length'};
-			next;
-		}
-
-		#just a precaution, check if file's sizes match
-        if ( &is_multi() ) {
-	  		$boffset += $tdata->{'info'}{'files'}[$_]{'length'};
-	  		next unless $tdata->{'info'}{'files'}[$_]{'length'} == $fstat[7];
-		} else {
-	  		$boffset += $tdata->{'info'}{'length'};
-	  		next unless $tdata->{'info'}{'length'} == $fstat[7];
 		}
 
 		$tdata->{'libtorrent_resume'}{'files'}[$_] = {
 			'mtime' => $fstat[9],
-			'completed' => &filechunks($ondisksize, $fstat[7])
+			'completed' => $fstat[7] ? filechunks($ondisksize, $fstat[7]) : 0
 		};
+
+		# count real in-disk data size
 		$ondisksize += $fstat[7];
 
     };
