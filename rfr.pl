@@ -397,7 +397,7 @@ sub recalc_bitfield {
     my $missingchunks = filechunks($offset, $size);
 
     print "Chunk offset: " . chunks($offset, $chunk_size) . " missingchunks: $missingchunks\n" if $debug;
-    substr $bf, &chunks($offset, $chunk_size), $missingchunks, $fill x $missingchunks;
+    substr $bf, chunks($offset, $chunk_size), $missingchunks, $fill x $missingchunks;
 
 
     print "BF length - " . length($bf) . "\n" if ($debug > 1);
@@ -466,6 +466,7 @@ sub tclean {
 
     cleanse($d->{'rtorrent'}{'chunks_wanted'});
     cleanse($d->{'rtorrent'}{'chunks_done'});
+    cleanse($d->{'libtorrent_resume'}{'bitfield'}) unless $d->{'rtorrent'}{'chunks_wanted'};
 
     if ( &is_multi() ) {
 		for (@{$d->{'info'}{'files'}}) {
