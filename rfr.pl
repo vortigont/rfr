@@ -15,6 +15,7 @@ use File::Basename;
 use File::Path qw(make_path);
 use Data::Dumper;
 use Pod::Usage;
+#use Math::Int64::native_if_available qw(uint64 string_to_uint64);
 
 use constant CHUNK_HASH_SIZE => 20;
 
@@ -231,7 +232,7 @@ sub getfiles {
 
 sub resume{
 
-    
+
     my $files;
     unless ( $files = &getfiles($tdata) ) { print "WARNING: Can't get file list from torrent\n"; return undef; };
 
@@ -243,27 +244,20 @@ sub resume{
 
 
     for (0..$#{$files}) {
-
 		my @fstat = -f "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
 
 		#print "On-disk file size - " . $fstat[7] . "\n" if ($debug > 1);
-		#just a precaution, check if file's sizes match
-        if ( is_multi() ) {
-	  		$boffset += $tdata->{'info'}{'files'}[$_]{'length'};
-	  		unless ( $tdata->{'info'}{'files'}[$_]{'length'} == $fstat[7] ){
+
+		#just a precaution, check if file's sizes match on-disk size
+		my $trnt_length = is_multi() ? $tdata->{'info'}{'files'}[$_]{'length'} : $tdata->{'info'}{'length'};
+
+  		unless ( defined $fstat[7] && $trnt_length == $fstat[7] ){
 				$fstat[7] = 0;
 				print "on-disk file-size doesn't match in-torrent size, reseting resume info\n" if $opt{'verbose'};
-			}
-		} else {
-	  		$boffset += $tdata->{'info'}{'length'};
-	  		unless ( $tdata->{'info'}{'length'} == $fstat[7] ){
-				$fstat[7] = 0;
-				print "on-disk file-size doesn't match in-torrent size, reseting resume info\n" if $opt{'verbose'};
-			}
 		}
 
 		#process non-existent/empty files
-		unless ( $fstat[7] ) {
+		unless ( $fstat[7] > 0 ) {
 			# fixme: partial session support
 			# not $tdata->{'libtorrent_resume'}{'files'}["$_"]{'priority'} ) {
 
@@ -272,8 +266,8 @@ sub resume{
 			# resume fails here if we were not requested to check for missing files
 			return undef unless $opt{'unfinished'};
 
-			#marks chunks for this file as missing in chunks bitvector
-			&recalc_bitfield( $boffset, $tdata->{'info'}{'files'}[$_]{'length'} );
+			#mark chunks for this file as missing in chunks bitvector
+			recalc_bitfield( $boffset, $tdata->{'info'}{'files'}[$_]{'length'} );
 
 	        my($filename, $dirpath, $suffix) = fileparse("$d${$files}[$_]");
 
@@ -296,12 +290,13 @@ sub resume{
 
 		$tdata->{'libtorrent_resume'}{'files'}[$_] = {
 			'mtime' => $fstat[9],
-			'completed' => $fstat[7] ? filechunks($ondisksize, $fstat[7]) : 0
+			'completed' => $fstat[7] ? filechunks($boffset, $fstat[7]) : 0
 		};
 
-		# count real in-disk data size
+		# count real on-disk data size
 		$ondisksize += $fstat[7];
-
+		# shift file pointer
+  		$boffset += $trnt_length;
     };
 
     # resume failed if ondisk size = 0 (no files to resume actualy) or
@@ -313,7 +308,7 @@ sub resume{
 		return undef;
     }
 
-    my $chunks_done = &chunks($ondisksize, $chunk_size);
+    my $chunks_done = chunks($ondisksize, $chunk_size);
     print "\nResume summary for torrent $tdata->{'info'}{'name'}:\n$chunks_done out of $chunks chunks done\n";
 
     #set some vars in torrent
@@ -426,7 +421,7 @@ sub filechunks {
 
 	#one extra byte to offset is required to cross chunk boundary
 	#one extra chunk is the one where file begins
-	return ( &chunks($offset + $size, $chunk_size) - &chunks($offset + 1, $chunk_size ) + 1 );
+	return ( &chunks($offset + $size, $chunk_size) - chunks($offset + 1, $chunk_size ) + 1 );
 }
 
 #checks the base path so we can find out if there is anything to resume
@@ -472,10 +467,23 @@ sub tclean {
 
     if ( &is_multi() ) {
 		for (@{$d->{'info'}{'files'}}) {
-			cleanse( $_->{'length'} );
+			#my $uint = string_to_uint64($_->{'length'});
+			#my $uint = uint64($_->{'length'});
+			#$_->{'length'} = $uint;
+			if ( $_->{'length'} < 2147483648) {
+			    cleanse( $_->{'length'} );
+			} else {
+			    die("File sizes over 2Gb is not supported yet :(((\n");
+			}
+			#cleanse( $_->{'length'} )	unless ( $_->{'length'} > 2147483647);
 		}
     } else {
-		cleanse($d->{'info'}{'length'});
+			#string_to_uint64($d->{'info'}{'length'});
+			if ($d->{'info'}{'length'} < 2147483648) {
+				cleanse($d->{'info'}{'length'});
+			} else {
+				die("File sizes over 2Gb is not supported yet :(((\n");
+			}
     }
 }
 
