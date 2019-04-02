@@ -8,18 +8,15 @@
 use warnings;
 use strict;
 use Getopt::Long 2.25 qw(:config gnu_getopt);
-#use Convert::Bencode qw(bencode bdecode);
-#use Convert::Bencode_XS qw(bencode bdecode);
 use Convert::Bencode_XS qw(:all);
 use File::Basename;
 use File::Path qw(make_path);
 use Data::Dumper;
 use Pod::Usage;
-#use Math::Int64::native_if_available qw(uint64 string_to_uint64);
 
 use constant CHUNK_HASH_SIZE => 20;
 
-my $VERSION = "1.0.2";
+my $VERSION = "1.0.3";
 
 #var for torrent data
 my $tdata;
@@ -37,21 +34,25 @@ my $help = 0;
 my %opt = ();
 GetOptions(\%opt,
 	    'base|b=s',
+		'cleanse|c',
+		'ce',
+		'cd',
 	    'debug|D+' => \$debug,
 	    'destination|d=s',
-	    'help|h' => sub{ &help() },
-	    'man' => sub{ &help('man') },
+		'force|f',
+	    'help|h' => sub{ help() },
+	    'man' => sub{ help('man') },
 	    'old-version|o',
 	    'remove-source|r',
 	    'session|s=s',
 	    'unfinished|u',
 	    'verbose|v',
-	    '<>' => \&do_torrent) or &help();
+	    '<>' => \&do_torrent);
 
 
-&help() unless %opt;
+help() unless %opt;
 
-&fix_session($opt{'session'}) if $opt{'session'};
+fix_session($opt{'session'}) if $opt{'session'};
 
 sub help {
     my $verb = shift;
@@ -66,7 +67,7 @@ sub init {
     $opt{'verbose'} = 1 if $debug;
 
     print STDERR (join("|",@ARGV),"\n") if $debug;
-	$Convert::Bencode_XS::COERCE = 0;
+	$Convert::Bencode_XS::COERCE = 0 if $opt{'nocoerce'};
 }
 
 # process a single torrent
@@ -89,12 +90,11 @@ sub do_torrent {
     }
 
     unless ( &resume() ) {
-		print "Something went wrong when resuming $tdata->{'info'}{'name'}\nTry verbose mode to see more info\n";
+		print "Something went wrong when resuming $tdata->{'info'}{'name'}\n";
+		print "Try verbose mode to see more info\n" if $debug;
 		return undef;
     }
 
-	#print "Dumping resumed torrent structure:\n" if $debug;
-    #print Dumper ($tdata) if $debug;
 	print "Dumping resumed torrent structure:\n" if $opt{'verbose'};
 	print Dumper ($tdata) if $opt{'verbose'};
 
@@ -106,7 +106,7 @@ sub do_torrent {
     #I don't care about basename's last element may not be a file
     # if I was able to load it recently than it must be a file
     $opt{'destination'} .= basename($tfile) if chkdir(\$opt{'destination'});
-    &savetofile( $tdata, $opt{'destination'} ) or return undef;
+    savetofile( $tdata, $opt{'destination'} ) or return undef;
 
     #hope no one will set -d to the source dir and -r simultaneously :)
     if ( $opt{'remove-source'} && $opt{'destination'} ne $tfile   ) {
@@ -177,21 +177,22 @@ sub load_file {
 
     unless (open(FP, $file)) { print "Could not open file $file: $!"; return undef; }
 
+	$Convert::Bencode_XS::COERCE = $opt{'cd'} ? 1 : 0;
+
     print "Loading file - $file\n" if $opt{'verbose'};
     my $data;
     local $/=undef;
     binmode(FP);
     {
-	$data = bdecode(<FP>);
-	# or die "Can't decode bencoded data\n";
+		$data = bdecode(<FP>);
+		# or die "Can't decode bencoded data\n";
     }
     close(FP);
 
     print "Torrent $data->{'info'}{'name'}\n" if (defined $data->{'info'}{'name'} && $opt{'verbose'});
-	#print "Loaded torrent structure:\n" if ($debug);
-    #print Dumper($data) if ($debug);
-	print "Loaded torrent structure:\n" if $opt{'verbose'};
-    print Dumper($data) if $opt{'verbose'};
+
+	print "Loaded torrent structure:\n" if $debug;
+    print Dumper($data) if $debug;
 
 
     return $data;
@@ -211,6 +212,7 @@ sub getfiles {
     if ( &is_multi() ) {
 		print "Multi file torrent: $t->{'info'}{'name'}\n" if $opt{'verbose'};
 		for (@{$t->{'info'}{'files'}}) {
+			#stringify(\@{$_->{'path'}});
 			push @files, join '/', @{$_->{'path'}}; 
 			$tsize += $_->{'length'};
 		}
@@ -220,11 +222,11 @@ sub getfiles {
 	  $tsize = $t->{'info'}{'length'};
     }
 
-    $chunks = &chunks($tsize,$chunk_size);
-    print "Total size: $tsize bytes; $chunks chunks; ", @files . " files.\n" if $opt{'verbose'};
-    print "Chunks hash length: " . length $t->{'info'}{'pieces'} . "\n" if $debug;
+    $chunks = chunks($tsize,$chunk_size);
+    print "Total size: $tsize bytes; $chunks chunks; ", @files . " files\n" if $opt{'verbose'};
+    print "Chunks hash length: " . length $t->{'info'}{'pieces'} . "\n\n" if $opt{'verbose'};
 
-    unless ( $chunks * CHUNK_HASH_SIZE == length $t->{'info'}{'pieces'} ) { print "Inconsistent piece information!\n"; return undef;}
+    unless ( $chunks * CHUNK_HASH_SIZE == length $t->{'info'}{'pieces'} ) { print "Inconsistent chunks information!\n"; return undef;}
 
     return \@files;
 }
@@ -234,7 +236,7 @@ sub resume{
 
 
     my $files;
-    unless ( $files = &getfiles($tdata) ) { print "WARNING: Can't get file list from torrent\n"; return undef; };
+    unless ( $files = getfiles($tdata) ) { print "WARNING: Can't get file list from torrent\n"; return undef; };
 
     my $d = $tdata->{'rtorrent'}{'directory'} . '/';
 
@@ -246,28 +248,27 @@ sub resume{
     for (0..$#{$files}) {
 		my @fstat = -f "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
 
-		#print "On-disk file size - " . $fstat[7] . "\n" if ($debug > 1);
-
-		#just a precaution, check if file's sizes match on-disk size
+		#just a precaution, check if file's size match on-disk size
 		my $trnt_length = is_multi() ? $tdata->{'info'}{'files'}[$_]{'length'} : $tdata->{'info'}{'length'};
 
-  		unless ( defined $fstat[7] && $trnt_length == $fstat[7] ){
-				$fstat[7] = 0;
-				print "on-disk file-size doesn't match in-torrent size, reseting resume info\n" if $opt{'verbose'};
+		unless ( defined $fstat[7] ) {
+			unless ($opt{'unfinished'}) { die("File: $d${$files}[$_] doesn't exist. Use '--unfinished' to do partial resume\n") };
+			print "Not found $d${$files}[$_]\n" if $opt{'verbose'};
+			$fstat[7] = 0;
+		} elsif ( $trnt_length != $fstat[7] ){
+			print "File: $d${$files}[$_] \non-disk file-size $fstat[7] doesn't match in-torrent size $trnt_length\n" if ($opt{'verbose'} || not $opt{'force'});
+			unless ($opt{'force'}) {die("Aborting resume... Use '--force' to override and reset file to unfinished state")};
+			print "reseting resume info\n";
+			$fstat[7] = 0;
 		}
 
 		#process non-existent/empty files
-		unless ( $fstat[7] > 0 ) {
+		unless ( $fstat[7] ) {
 			# fixme: partial session support
 			# not $tdata->{'libtorrent_resume'}{'files'}["$_"]{'priority'} ) {
 
-			print "File not found or size is 0: $d${$files}[$_]\n" if $opt{'verbose'};
-
-			# resume fails here if we were not requested to check for missing files
-			return undef unless $opt{'unfinished'};
-
 			#mark chunks for this file as missing in chunks bitvector
-			recalc_bitfield( $boffset, $tdata->{'info'}{'files'}[$_]{'length'} );
+			recalc_bitfield( $boffset, $trnt_length );
 
 	        my($filename, $dirpath, $suffix) = fileparse("$d${$files}[$_]");
 
@@ -348,12 +349,19 @@ sub savertsession {
 # args - reference to a data to bencode
 #      - file name with full path
 sub savetofile {
-    my $data = shift;
-    my $file = shift;
+    my ($data, $file) = @_;
 
     unless ( open(FP, ">$file") ) { print "Could not open file $file for writing:\n $!"; return undef; }
     print "Saving to file $file\n" if $opt{'verbose'};
-	tclean($data);
+	tclean($data) if $opt{'cleanse'};
+
+	$Convert::Bencode_XS::COERCE = $opt{'ce'} ? 1 : 0;
+
+		for (@{$data->{'info'}{'files'}}) {
+			stringify(\@{$_->{'path'}});
+		}
+
+
     my $content = bencode $data;
 
     binmode(FP);
@@ -375,17 +383,16 @@ sub chkdir {
 }
 
 sub recalc_bitfield {
-    my $offset = shift; my $size = shift;
+    my ($offset, $size) = @_;
 
-    my $bf; 		#bitfield vector
+    my $bf; 	#bitfield vector
     my $x;		#mode of operation 0 - for new torrents, 1 - for session
-    my $fill;		# not x actualy
+    my $fill;	# not x actualy
 
     $x = $opt{'session'} ? 0 : 1; $fill = $x ? 0 : 1;
 
     #init vector
     if ( not defined $tdata->{'libtorrent_resume'}{'bitfield'} ) {
-		#my $vlength = int($chunks / 8 + 1);
 		$bf = $x x $chunks;
     } else {
 		$bf = unpack("B$chunks", $tdata->{'libtorrent_resume'}{'bitfield'});
@@ -393,7 +400,7 @@ sub recalc_bitfield {
 
     my $missingchunks = filechunks($offset, $size);
 
-    print "Chunk offset: " . chunks($offset, $chunk_size) . " missingchunks: $missingchunks\n" if $debug;
+    print "Chunk offset: " . chunks($offset, $chunk_size) . " missing $missingchunks chunks\n\n" if $debug;
     substr $bf, chunks($offset, $chunk_size), $missingchunks, $fill x $missingchunks;
 
 
@@ -461,31 +468,68 @@ sub tclean {
 
 	print "Cleansing file sizes\n" if $debug;
 
-    cleanse($d->{'rtorrent'}{'chunks_wanted'});
-    cleanse($d->{'rtorrent'}{'chunks_done'});
-    cleanse($d->{'libtorrent_resume'}{'bitfield'}) unless $d->{'rtorrent'}{'chunks_wanted'};
+    intcleanse(\$d->{'rtorrent'}{'chunks_wanted'});
+    intcleanse(\$d->{'rtorrent'}{'chunks_done'});
+    intcleanse(\$d->{'libtorrent_resume'}{'bitfield'}) unless $d->{'rtorrent'}{'chunks_wanted'};
 
-    if ( &is_multi() ) {
+    if ( is_multi() ) {
 		for (@{$d->{'info'}{'files'}}) {
-			#my $uint = string_to_uint64($_->{'length'});
-			#my $uint = uint64($_->{'length'});
-			#$_->{'length'} = $uint;
-			if ( $_->{'length'} < 2147483648) {
-			    cleanse( $_->{'length'} );
-			} else {
-			    die("File sizes over 2Gb is not supported yet :(((\n");
-			}
-			#cleanse( $_->{'length'} )	unless ( $_->{'length'} > 2147483647);
+			intcleanse( \$_->{'length'} );
+#			if ( $_->{'length'} < 2147483648) {
+#			    cleanse( $_->{'length'} );
+#			} else {
+#			    die("File sizes over 2Gb is not supported yet :(((\n");
+#			}
 		}
     } else {
-			#string_to_uint64($d->{'info'}{'length'});
-			if ($d->{'info'}{'length'} < 2147483648) {
-				cleanse($d->{'info'}{'length'});
-			} else {
-				die("File sizes over 2Gb is not supported yet :(((\n");
-			}
+				intcleanse(\$d->{'info'}{'length'});
+
+#			if ($d->{'info'}{'length'} < 2147483648) {
+#				cleanse($d->{'info'}{'length'});
+#			} else {
+#				die("File sizes over 2Gb is not supported yet :(((\n");
+#			}
     }
 }
+
+# cleanse reference
+sub intcleanse {
+
+	my $ref = shift;
+	#can't cleanse ints more than 2^31-1
+	print "Clensing int: $$ref\n" if ($debug);
+	if ($$ref < 2147483648 || $opt{'force'}) {
+		cleanse($$ref);
+	} else {
+		die("Cleansing integers over 2Gb is not supported yet\nUse '--force' to override\n");
+	}
+}
+
+#force string for filepath array
+sub stringify {
+  my $ref = shift;
+	#return;
+	#stringify(\@{$_->{'path'});
+	#push @files, join '/', @{$_->{'path'}}; 
+    for (0..$#{$ref}) {
+		#my @fstat = -f "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
+        #{
+        #     'path' => [
+        #                 'Audio',
+        #                 '(1963) Burns and Carlin at the Playboy Club',
+        #                 '08 - Mort Sahl.mp3'
+        #                 ],
+        #     'length' => 5129406
+        # },
+		#if ( $ref->[$_] =~ m/^[1-9]\d*$/ ) { $ref->[$_] = sprintf "%s", $ref->[$_]; print"Fpath: " . $ref->[$_] . "\n"; }
+		if ( $ref->[$_] =~ m/^[1-9]\d*$/ ) { $ref->[$_] .= "\0";  print "Fpath: " . $ref->[$_] . "\n"; }
+		#if ( $ref->[$_] =~ m/^[1-9]\d*$/ ) { $ref->[$_] = '/'.$ref->[$_]; chop $ref->[$_]; print"Fpath: " . $ref->[$_] . "\n"; }
+
+		#print "Fpath: " . $ref->[$_] . "\n";
+	}
+
+}
+
 
 # no code after this mark
 
