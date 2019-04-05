@@ -8,45 +8,50 @@
 use warnings;
 use strict;
 use Getopt::Long 2.25 qw(:config gnu_getopt);
-#use Convert::Bencode qw(bencode bdecode);
-use Convert::Bencode_XS qw(bencode bdecode);
+use Convert::Bencode_XS qw(:all);
 use File::Basename;
+use File::Path qw(make_path);
 use Data::Dumper;
 use Pod::Usage;
 
-my $VERSION = "1.0.1";
+use constant CHUNK_HASH_SIZE => 20;
+
+my $VERSION = "1.1.0";
 
 #var for torrent data
 my $tdata;
 # chunks in torrent
 my $chunks;
-my $chunks_done;
+my $chunk_size;
 my $tsize;
 my $debug = 0;
 
 my $man = 0;
 my $help = 0;
 
+# by default do coerce on bencode/decode
+my $coerce = 1;
+
 # options parsing
 my %opt = ();
 GetOptions(\%opt,
 	    'base|b=s',
-	    'debug|D',
+	    'debug|D+' => \$debug,
 	    'destination|d=s',
-	    'help|h' => sub{ &help() },
-	    'man' => sub{ &help('man') },
+		'force|f',
+	    'help|h' => sub{ help() },
+	    'man' => sub{ help('man') },
 	    'old-version|o',
 	    'remove-source|r',
 	    'session|s=s',
 	    'unfinished|u',
 	    'verbose|v',
-	    'coerce|c',
-	    '<>' => \&do_torrent) or &help();
+	    '<>' => \&do_torrent);
 
 
-&help() unless %opt;
+help() unless %opt;
 
-&fix_session($opt{'session'}) if $opt{'session'};
+fix_session($opt{'session'}) if $opt{'session'};
 
 sub help {
     my $verb = shift;
@@ -58,12 +63,9 @@ sub help {
 
 sub init {
     #ugly hack
-    $debug = $opt{'debug'} if $opt{'debug'};
     $opt{'verbose'} = 1 if $debug;
 
-    print STDERR (join("|",@ARGV),"\n") if $opt{'debug'};
-	# Disable bencode coerce, serialize strings with integers as strings
-    $Convert::Bencode_XS::COERCE = 0 unless $opt{'coerce'};
+    print STDERR (join("|",@ARGV),"\n") if $debug;
 }
 
 # process a single torrent
@@ -77,20 +79,22 @@ sub do_torrent {
     #base is a mandatory
     unless  ( $opt{'base'} ) { print "Base dir (-b option) is a mandatory!\n"; return undef; }
 
-    #load file
-    $tdata = &load_file($tfile) or return undef;
+    #load torrent file
+    load_file($tfile, \$tdata, $coerce) or return undef;
 
-    #check if basepath is valid, contains any data to resume. Set rtorrent directory, so we'll need it later
-    unless ( $tdata->{'rtorrent'}{'directory'} = &chk_basedir($opt{'base'}) ){
-	print "Base path is wrong, aborting...\n"; return undef;
+	#check for coerce data
+	$coerce = coercechck(\$tdata, $tfile);
+
+	torrent_check($tdata) or return undef;
+
+    unless ( resume() ) {
+		print "Something went wrong when resuming $tdata->{'info'}{'name'}\n";
+		print "Try verbose mode to see more info\n" unless $opt{'verbose'};
+		return undef;
     }
 
-    unless ( &resume() ) {
-	print "Something went wrong when resuming $tdata->{'info'}{'name'}\nTry verbose mode to see more info\n";
-	return undef;
-    }
-
-    print Dumper ($tdata) if $debug;
+	print "Dumping resumed torrent structure:\n" if $debug;
+	print Dumper ($tdata) if $debug;
 
     # save to the sourse file if destination is not set
     $opt{'destination'} = $tfile unless $opt{'destination'};
@@ -100,7 +104,7 @@ sub do_torrent {
     #I don't care about basename's last element may not be a file
     # if I was able to load it recently than it must be a file
     $opt{'destination'} .= basename($tfile) if chkdir(\$opt{'destination'});
-    &savetofile( $tdata, $opt{'destination'} ) or return undef;
+    savetofile( $tdata, $opt{'destination'}, $coerce ) or return undef;
 
     #hope no one will set -d to the source dir and -r simultaneously :)
     if ( $opt{'remove-source'} && $opt{'destination'} ne $tfile   ) {
@@ -134,12 +138,14 @@ sub fix_session {
 	print "\n====\nProcessing file $torrent\n" if $opt{'verbose'};
 
 
-	$tdata = &load_file($torrent);
+	load_file($torrent, \$tdata, $coerce);
+	torrent_check($tdata);
+
 	if ( not  $tdata ) { print "WARNING: Can't load $_\n"; next; }
-	
+
 	#new version of rtorrent stores its data in separate files
 	unless ( $opt{'old-version'} ) { 
-	    unless ( &load_rtdata($torrent) ) {
+	    unless ( load_rtdata($torrent, \$tdata) ) {
 		print "WARNING: Can't load rtorrent data for $_\n"; next;
 	    }
 	};
@@ -148,10 +154,6 @@ sub fix_session {
 	    print "This torrent is finished\n" if $opt{'verbose'}; next;
 	}
 
-	#check if basepath is valid, contains any data to resume
-	unless (  &chk_basedir($tdata->{'rtorrent'}{'directory'}) ) {
-	    print "Base path is wrong, aborting...\n" if $opt{'verbose'}; next;
-	}
 
 	#try resume this torrent
 	unless ( &resume() ) {
@@ -166,148 +168,224 @@ sub fix_session {
 }
 
 #returns bdecoded data or undef if file is broken or not readable
+# params:
+# 0 - path to the file
+# 1 - ref to a variable where to put bdecoded data
+# 2 - do coerce on bdecode
 sub load_file {
-    my $file = shift;
+    my ($file, $data, $coer) = @_;
+
+	$Convert::Bencode_XS::COERCE = $coer;
 
     unless (open(FP, $file)) { print "Could not open file $file: $!"; return undef; }
+    print "Loading file - $file with coerce=$coer\n" if $opt{'verbose'};
 
-    print "Loading file - $file\n" if $opt{'verbose'};
-    my $data;
     local $/=undef;
     binmode(FP);
     {
-	$data = bdecode(<FP>);
-	# or die "Can't decode bencoded data\n";
+		${$data} = bdecode(<FP>);
+		# or die "Can't decode bencoded data\n";
     }
     close(FP);
 
-    print "Torrent $data->{'info'}{'name'}\n" if (defined $data->{'info'}{'name'} && $opt{'verbose'});
-    #print Dumper($data) if $debug;
+	print "Loaded torrent structure:\n" if $debug;
+    print Dumper(${$data}) if $debug;
 
-    return $data;
+	return 1;
 }
+
+#return true if scalar is integer digits only
+sub onlydigits {
+	my $str = shift;
+
+	return 1 if ($str =~ m/^\d+$/);
+
+	return 0;
+}
+
+#return true if scalar is over 2^31-1
+sub over2gb {
+	my $str = shift;
+	return 1 if ($str > 2147483648 );
+	return 0;
+}
+
+# check torrent content if it must be coerced or not on bencode/bdecode
+# by default coerce is enabled and true is returned if no issues
+# if there are path elements decoded as int's that torrent file is reloaded without coerce
+# and false is returned
+# if nither options are sutable than undef is returned
+sub coercechck {
+	my ( $dref, $file ) = @_;
+	my $strasint = 0;
+	my $largefile = 0;
+	my $data = ${$dref};
+
+    if ( is_multi($data) ) {
+		for (@{$data->{'info'}{'files'}}) {
+			for ( @{$_->{'path'}} ) {
+				if ( onlydigits($_) ) {
+					$strasint = 1;
+					last if $strasint;
+				}
+			}
+			if (over2gb($_->{'length'})) { $largefile =1;}
+			last if ( $largefile && $strasint);
+		}
+    } else {
+		$strasint = onlydigits($data->{'info'}{'name'});
+		$largefile = $data->{'info'}{'length'};
+    }
+
+
+	if ($strasint && $largefile) {
+		# return undef;
+		die("Torrent has filepath with digits-only element AND some file has size over 2Gb\n!!!Resuming such torrents is not supported due to perl scalar handling :(((\n");
+	} elsif ($strasint) {
+		print "Torrent has filepath with digits-only, bdecoding without coerce\n" if $opt{'verbose'};
+		#switch global coerce to 0, cause we need to bencode without corce too
+		load_file($file, $dref, 0);
+		return 0;
+    }
+
+	return 1;
+}
+
+# do base check fot torrent file
+sub torrent_check {
+	my $data = shift;
+
+    unless (ref $data eq "HASH" and exists $data->{'info'}) { print "No info key.\n"; return undef; }
+
+    print "Torrent name: $data->{'info'}{'name'}\n" if (defined $data->{'info'}{'name'} && $opt{'verbose'});
+
+	#check basepath
+	my $chkpath = $opt{'session'} ? $tdata->{'rtorrent'}{'directory'} : $opt{'base'};
+
+	unless ( $chkpath = chk_basedir($chkpath, $data) ) {
+		print "Base path $chkpath is wrong, aborting...\n";
+		return undef;
+	}
+
+	#Set rtorrent directory, we'll need it later
+	$data->{'rtorrent'}{'directory'} = $chkpath unless $opt{'session'};
+	return 1;
+}
+
 
 # sub getfiles checks torrent data for errors, makes basic calculations and
 # returns ref to a list of all files in torrent
 sub getfiles {
     my $t = shift;
 
-    my $psize;
-
-    unless (ref $t eq "HASH" and exists $t->{'info'}) { print "No info key.\n"; return undef; }
-
-    unless ( $psize = $t->{'info'}{'piece length'} ) {print "No piece length key.\n"; return undef; }
+    unless ( $chunk_size = $t->{'info'}{'piece length'} ) {print "No piece length key.\n"; return undef; }
 
     my @files = ();
     $tsize = 0;
-    if ( &is_multi() ) {
-	print "Multi file torrent: $t->{'info'}{'name'}\n" if $opt{'verbose'};
-	for (@{$t->{'info'}{'files'}}) {
-		push @files, join '/', @{$_->{'path'}}; 
-		$tsize += $_->{'length'};
-	}
+    if ( is_multi($t) ) {
+		print "Multi file torrent: $t->{'info'}{'name'}\n" if $opt{'verbose'};
+		for (@{$t->{'info'}{'files'}}) {
+			push @files, join '/', @{$_->{'path'}}; 
+			$tsize += $_->{'length'};
+		}
     } else {
-	print "Single file torrent: $t->{'info'}{'name'}\n" if $opt{'verbose'};
-	@files = ($t->{'info'}{'name'});
-	$tsize = $t->{'info'}{'length'};
+	  print "Single file torrent: $t->{'info'}{'name'}\n" if $opt{'verbose'};
+	  @files = ($t->{'info'}{'name'});
+	  $tsize = $t->{'info'}{'length'};
     }
 
-    $chunks = &chunks($tsize,$psize);
-    print "Total size: $tsize bytes; $chunks chunks; ", @files . " files.\n" if $opt{'verbose'};
+    $chunks = chunks($tsize,$chunk_size);
+    if ($opt{'verbose'}) {print "Total: $tsize bytes; $chunks chunks; ", @files . " files\n";}
+    if ($opt{'verbose'}) {print "Chunks hash length: " . length $t->{'info'}{'pieces'}; print "bytes\n\n";}
 
-    unless ( $chunks*20 == length $t->{'info'}{'pieces'} ) { print "Inconsistent piece information!\n"; return undef;}
+    unless ( $chunks * CHUNK_HASH_SIZE == length $t->{'info'}{'pieces'} ) { print "Inconsistent chunks hash information!\n"; return undef;}
 
     return \@files;
 }
 
-
+# resume torrent
 sub resume{
 
-    
     my $files;
-    unless ( $files = &getfiles($tdata) ) { print "WARNING: Can't get file list from torrent\n"; return undef; };
+    unless ( $files = getfiles($tdata) ) { print "WARNING: Can't get file list from torrent\n"; return undef; };
 
     my $d = $tdata->{'rtorrent'}{'directory'} . '/';
 
-    
-    my $ondisksize = 0;
-    my $boffset = 0;
-
+    my $ondisksize = 0;		#on-disk data size counter
+    my $boffset = 0;		#block offset
+	my $missing = 0;		#chunks missing
 
     for (0..$#{$files}) {
+		my @fstat = -f "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
 
-	my @fstat = -f "$d${$files}[$_]" ? stat "$d${$files}[$_]" : () ;
+		#just a precaution, check if file's size match on-disk size
+		my $trnt_length = is_multi($tdata) ? $tdata->{'info'}{'files'}[$_]{'length'} : $tdata->{'info'}{'length'};
 
-	#print "File size - " . $fstat[7] . "\n";
-	#print "Size is zero\n" if ($fstat[7] == 0);
-
-	unless ( $fstat[7] ) {
-	    # fixme: partial session support
-	    # not $tdata->{'libtorrent_resume'}{'files'}["$_"]{'priority'} ) {
-
-	    print "File not found or size is 0: $d${$files}[$_]\n" if $opt{'verbose'};
-
-	    # resume fails here if we were not requested to check for missing files
-	    return undef unless $opt{'unfinished'};
-
-	    #marks chunks for this file as missing in chunks bitvector
-	    &recalc_bitfield( $boffset, $tdata->{'info'}{'files'}[$_]{'length'} );
-
-            my($filename, $dirpath, $suffix) = fileparse("$d${$files}[$_]");
-
-	    #create nonexistent files
-	    unless ( -s "$d${$files}[$_]" ) {
-		print "Creating zero byte file: $d${$files}[$_]\n\n" if $opt{'verbose'};
-
-		# recreate dir path if missing
-		unless ( -d $dirpath ) {
-			system("mkdir -p \"$dirpath\"" ) == 0 or return undef;
+		unless ( defined $fstat[7] ) {
+			unless ($opt{'unfinished'}) { die("File: $d${$files}[$_] doesn't exist. Use '--unfinished' to do partial resume\n") };
+			print "Not found $d${$files}[$_]\n" if $opt{'verbose'};
+			$fstat[7] = 0;
+		} elsif ( $trnt_length != $fstat[7] ){
+			print "File: $d${$files}[$_] \non-disk file-size $fstat[7] doesn't match in-torrent size $trnt_length\n" if ($opt{'verbose'} || not $opt{'force'});
+			unless ($opt{'force'}) {die("Aborting resume... Use '--force' to override and reset file to unfinished state")};
+			print "reseting resume info\n";
+			$fstat[7] = 0;
 		}
 
-		open(FILE,">>$d${$files}[$_]") or die "Can't create file $d${$files}[$_]";
-		close(FILE);
+		#process non-existent/empty files
+		unless ( $fstat[7] ) {
+			# fixme: partial session support
+			# not $tdata->{'libtorrent_resume'}{'files'}["$_"]{'priority'} ) {
 
-		#refresh fstat for the new file
-		@fstat = stat "$d${$files}[$_]" or return undef;
-	    }
+			#mark chunks for this file as missing in chunks bitvector
+			$missing = recalc_bitfield( $boffset, $trnt_length ) if $trnt_length;
 
+	        my($filename, $dirpath, $suffix) = fileparse("$d${$files}[$_]");
 
-	    $tdata->{'libtorrent_resume'}{'files'}[$_] = { 'mtime' => $fstat[9], 'completed' => '0' };
-	    $boffset += $tdata->{'info'}{'files'}[$_]{'length'};
-	    next;
-	}
+		    #create nonexistent files
+	  		unless ( -f "$d${$files}[$_]" ) {
+				print "Creating zero byte file: $d${$files}[$_]\n\n" if $opt{'verbose'};
 
-	#just a precaution, check if file's sizes match
-        if ( &is_multi() ) {
-	    $boffset += $tdata->{'info'}{'files'}[$_]{'length'};
-	    next unless $tdata->{'info'}{'files'}[$_]{'length'} == $fstat[7];
-	} else { 
-	    $boffset += $tdata->{'info'}{'length'};
-	    next unless $tdata->{'info'}{'length'} == $fstat[7];
-	}
+				# recreate dir path if missing
+				unless ( -d $dirpath ) {
+					make_path($dirpath) or return undef
+				}
 
+				open(FILE,">>$d${$files}[$_]") or die "Can't create file $d${$files}[$_]";
+				close(FILE);
 
-	$ondisksize += $fstat[7];
-	$tdata->{'libtorrent_resume'}{'files'}[$_] = { 'mtime' => $fstat[9], 'completed' => '1' };
+				#refresh fstat for the new file
+				@fstat = stat "$d${$files}[$_]" or return undef;
+			}
+		}
+
+		$tdata->{'libtorrent_resume'}{'files'}[$_] = {
+			'mtime' => $fstat[9],
+			'completed' => $fstat[7] ? filechunks($boffset, $fstat[7]) : 0
+		};
+
+		# count real on-disk data size
+		$ondisksize += $fstat[7];
+		# shift file pointer
+  		$boffset += $trnt_length;
     };
 
     # resume failed if ondisk size = 0 (no files to resume actualy) or
     # ondisk size doens't match sum off all files in torrent and we were not requested to resume missing files
     if ( defined $opt{'unfinished'} && $opt{'unfinished'} != 1 && $ondisksize != $tsize ||  $ondisksize == 0 ) {
-	print "Oops! Files size verification failed\n";
-	print "Either not all files present or nothing to resume at all\n";
-	print "In torrent size = $tsize,\t on-disk size = $ondisksize\n" if $opt{'verbose'};
-	return undef;
+		print "Oops! Files size verification failed\n";
+		print "Either not all files present or nothing to resume at all\n";
+		print "In torrent size = $tsize,\t on-disk size = $ondisksize\n";
+		return undef;
     }
 
-    my $chunks_done = &chunks($ondisksize,$tdata->{'info'}{'piece length'});
-    print "\nResume summary for torrent $tdata->{'info'}{'name'}:\n$chunks_done out of $chunks chunks done\n";
+    print "\nResume summary for torrent $tdata->{'info'}{'name'}:\n$missing out of $chunks missing\n";
 
     #set some vars in torrent
-    $tdata->{'rtorrent'}{'chunks_wanted'} = $chunks - $chunks_done;
-    $tdata->{'rtorrent'}{'chunks_done'} = $chunks_done;
-    $tdata->{'rtorrent'}{'complete'} = ($chunks_done != $chunks) ? 0 : 1;
-    $tdata->{'libtorrent_resume'}{'bitfield'} = $chunks unless ($chunks_done != $chunks);
+    $tdata->{'rtorrent'}{'chunks_wanted'} = $missing;
+    $tdata->{'rtorrent'}{'chunks_done'} = $chunks - $missing;
+    $tdata->{'rtorrent'}{'complete'} = $missing ? 0 : 1;
+    $tdata->{'libtorrent_resume'}{'bitfield'} = $chunks unless ($missing);
     return 1;
 }
 
@@ -315,9 +393,9 @@ sub resume{
 #loads additional data for the new rtorrent versions to the global array
 #returns 1 if success, 0 otherwise
 sub load_rtdata {
-    my $file = shift;
-    $tdata->{'libtorrent_resume'} = &load_file($file . '.libtorrent_resume') or return 0;
-    $tdata->{'rtorrent'} = &load_file($file . '.rtorrent') or return 0;
+    my ($file, $t) = @_;
+    load_file($file . '.libtorrent_resume', \$t->{'libtorrent_resume'}, 1) or return 0;
+    load_file($file . '.rtorrent', \$t->{'rtorrent'}, 1) or return 0;
     return 1;
 }
 
@@ -326,12 +404,12 @@ sub savertsession {
     my $file = shift;
 
     if ( $opt{'old-version'} ) {
-	savetofile($tdata, $file) or return undef;
+	savetofile($tdata, $file, $coerce) or return undef;
     }
     else {
 	#save libtorrent_resume
-	savetofile($tdata->{'libtorrent_resume'}, $file . '.libtorrent_resume') or return undef;
-	savetofile($tdata->{'rtorrent'}, $file . '.rtorrent') or return undef;
+	savetofile($tdata->{'libtorrent_resume'}, $file . '.libtorrent_resume', 1) or return undef;
+	savetofile($tdata->{'rtorrent'}, $file . '.rtorrent', 1) or return undef;
     }
     return 1;
 }
@@ -340,12 +418,17 @@ sub savertsession {
 # args - reference to a data to bencode
 #      - file name with full path
 sub savetofile {
-    my $data = shift;
-    my $file = shift;
+    my ($data, $file, $coer) = @_;
+
+	$Convert::Bencode_XS::COERCE = $coer;
+
+	# do cleance on rtorrent data integers if global coerce = 0
+	rtclean($data) unless $coer;
 
     unless ( open(FP, ">$file") ) { print "Could not open file $file for writing:\n $!"; return undef; }
-    print "Saving to file $file\n" if $opt{'verbose'};
-    my $content = bencode $data;
+    print "Saving bencode to file $file with coerce $coerce\n" if $opt{'verbose'};
+
+    my $content = bencode($data);
 
     binmode(FP);
     print FP $content;
@@ -366,65 +449,72 @@ sub chkdir {
 }
 
 sub recalc_bitfield {
-    my $offset = shift; my $size = shift;
+    my ($offset, $size) = @_;
 
-    my $bf; 		#bitfield vector
+    my $bf; 	#bitfield vector
     my $x;		#mode of operation 0 - for new torrents, 1 - for session
-    my $fill;		# not x actualy
+    my $fill;	# not x actualy
 
     $x = $opt{'session'} ? 0 : 1; $fill = $x ? 0 : 1;
 
     #init vector
     if ( not defined $tdata->{'libtorrent_resume'}{'bitfield'} ) {
-	#my $vlength = int($chunks / 8 + 1);
-	$bf = $x x $chunks;
+		$bf = $x x $chunks;
     } else {
-	$bf = unpack("B$chunks", $tdata->{'libtorrent_resume'}{'bitfield'});
+		$bf = unpack("B$chunks", $tdata->{'libtorrent_resume'}{'bitfield'});
     }
 
-    my $blkoffset = &chunks($offset, $tdata->{'info'}{'piece length'}) - 1;
-    my $missingchunks = &chunks($size + $offset, $tdata->{'info'}{'piece length'}) - $blkoffset;
+    my $missingchunks = filechunks($offset, $size);
 
-    print "offset - $blkoffset, missingchunks - $missingchunks\n" if $debug;
-    substr $bf, $blkoffset, $missingchunks, $fill x $missingchunks;
+    print "Chunk offset: " . chunks($offset, $chunk_size) . "; missing $missingchunks chunks\n\n" if $debug;
+    substr $bf, chunks($offset, $chunk_size), $missingchunks, $fill x $missingchunks;
+	my $missing = $bf =~ tr/0//;
 
-
-    print "BF length - " . length($bf) . "\n" if $debug;
-    print "Chunk map:\n" . join(':', unpack("(A8)*", $bf)) . "\n===\n" if $debug;
+	print "Chunks missing: $missing\n" if ($debug);
+    print "BF length - " . length($bf) . "\n" if ($debug > 1);
+    print "Chunk map:\n" . join(':', unpack("(A8)*", $bf)) . "\n===\n" if ($debug > 1);
 
     $tdata->{'libtorrent_resume'}{'bitfield'} = pack("B$chunks", $bf);
 
-    #unless ( -e "$d${$files}[$$_]" || $tdata->{'libtorrent_resume'}{'files'}["$_"]{'priority'} != "0"  ) {
-    #unless ( -e "$d${$files}[$_]" ) {
-
-    #my $hz = Dumper (@bf);
-    #print $hz;
-    return 1;
+    return $missing;
 }
 
+# return number of block with size $bsize required
+# to fit specified amount of bytes
 sub chunks {
-    my $length = shift;
-    my $chsize = shift;
-    return int($length / $chsize + 1);
+    my ($length, $bsize) =@_;
+    my $div = int($length / $bsize);
+    $length % $bsize ? return ($div+1) : return $div ;
+}
+
+
+# find how many chunks it needs to fit block of data
+# with size S begining at specified offset F
+sub filechunks {
+    my ($offset, $size) =@_;
+
+	#one extra byte to offset is required to cross chunk boundary
+	#one extra chunk is the one where file begins
+	return ( chunks($offset + $size, $chunk_size) - chunks($offset + 1, $chunk_size ) + 1 );
 }
 
 #checks the base path so we can find out if there is anything to resume
 #returns path suitable to put in rtorrent->directory option or undef if any error
 sub chk_basedir {
-    my $path = shift;
+    my ($path, $trnt) = @_;
 
     unless ( &chkdir(\$path) ) { print "Base $path is not a dir\n" if $opt{'verbose'}; return undef; }
 
-    if ( &is_multi() ) {
-	#in session torrents this path is already set
-	$path = $path . $tdata->{'info'}{'name'} unless $opt{'session'};
+    if ( is_multi($trnt) ) {
+		#in session torrents this path is already set
+		$path = $path . $trnt->{'info'}{'name'} unless $opt{'session'};
 
-	my $dh;
+		my $dh;
         #base dir for multifile  torrent must be at least not empty or we got nothing to do here
-	unless ( opendir($dh, $path) ) { print "Can't open dir $path, $!\n"; return undef; }
-	unless ( scalar(grep( !/^\.\.?$/, readdir($dh))) ) { print "Directory $path is empty\n";  return undef; }
+		unless ( opendir($dh, $path) ) { print "Can't open dir $path, $!\n"; return undef; }
+		unless ( scalar(grep( !/^\.\.?$/, readdir($dh))) ) { print "Directory $path is empty\n";  return undef; }
     } else {
-	unless ( -e $path . $tdata->{'info'}{'name'} ) {
+	unless ( -e $path . $trnt->{'info'}{'name'} ) {
 	    print "No file under the base path so nothing to resume here\n" if $opt{'verbose'};
 	    return undef;
 	}
@@ -435,9 +525,45 @@ sub chk_basedir {
     return $path;
 }
 
+# return true if torrent is multifile
 sub is_multi {
-     return exists $tdata->{'info'}{'files'};
+	my ($td) = @_;
+    return exists $td->{'info'}{'files'};
 };
+
+sub rtclean {
+    my ($d) = @_;
+
+    print "Cleansing rtorrent data\n" if $debug;
+
+    intcleanse(\$d->{'rtorrent'}{'chunks_wanted'});
+    intcleanse(\$d->{'rtorrent'}{'chunks_done'});
+    intcleanse(\$d->{'libtorrent_resume'}{'bitfield'}) unless $d->{'rtorrent'}{'chunks_wanted'};
+
+    if ( is_multi($d) ) {
+        for (@{$d->{'info'}{'files'}}) {
+            intcleanse( \$_->{'length'} );
+        }
+    } else {
+                intcleanse(\$d->{'info'}{'length'});
+    }
+}
+
+# cleanse integer
+sub intcleanse {
+
+    my $ref = shift;
+
+	return unless defined $$ref;
+    #can't cleanse ints more than 2^31-1
+    print "Clensing int: $$ref\n" if ($debug > 1);
+    if ($$ref < 2147483648 || $opt{'force'}) {
+        cleanse($$ref);
+    } else {
+        die("Cleansing integers over 2Gb is not supported yet\nUse '--force' to override if U know what you are doing\n");
+    }
+}
+
 
 # no code after this mark
 
@@ -470,7 +596,8 @@ This version supports:
     Options:
     -b, --base	<path>		Base directory to look for data files
     -D, --debug			debug output. WARNING! This will produle a lot of output including bencoded data dump,
-				it's stongly advised to redirect STDOUT to a file, so it will not trash you terminal
+				it's stongly advised to redirect STDOUT to a file, so it will not trash you terminal.
+				Specify twice to produce even more debug output, including bitfield vector for each file.
     -d, --destination <path>	destination dir|file to save resumed torrent file
     -h, --help	  		brief help message
     --man        		full documentation
@@ -479,7 +606,6 @@ This version supports:
     -s, --session <path>	resume all torrents in rtorrent session directory under <path>
     -u, --unfinished		check for missing files and resume partialy downloaded torrent
     -v, --verbose		be more verbose about what's going on there
-    -c, --coerce		serialize (\d+) strings as integers (may corrupt torrents with digits-only directory/file names, like '\dir\123\name\somefile' )
 
     [file]			torrent file to resume
 
