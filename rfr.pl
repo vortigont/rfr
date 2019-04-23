@@ -11,8 +11,10 @@ use Getopt::Long 2.25 qw(:config gnu_getopt);
 use Convert::Bencode_XS qw(:all);
 use File::Basename;
 use File::Path qw(make_path);
+use File::Copy qw(copy);
 use Data::Dumper;
 use Pod::Usage;
+use Digest::SHA1 qw(sha1_hex);
 
 use constant CHUNK_HASH_SIZE => 20;
 
@@ -38,6 +40,7 @@ GetOptions(\%opt,
 	    'base|b=s',
 	    'debug|D+' => \$debug,
 	    'destination|d=s',
+		'dump=s' => \&tdump,
 		'force|f',
 	    'help|h' => sub{ help() },
 	    'man' => sub{ help('man') },
@@ -46,10 +49,20 @@ GetOptions(\%opt,
 	    'session|s=s',
 	    'unfinished|u',
 	    'verbose|v',
+	    't2r=s',
+		'tied|t',
 	    '<>' => \&do_torrent);
 
 
 help() unless %opt;
+
+if ( $opt{'t2r'} ){
+    #dst is a mandatory
+    unless ( chkdir(\$opt{'destination'}) ) { print "Destination dir (-d option) is a mandatory!\n"; exit 1; }
+    unless ( chkdir(\$opt{'t2r'}) ) { print "--t2r must be a transmission session dir\n"; exit 1; }
+    t2r($opt{'t2r'}, $opt{'destination'});
+    exit 0;
+}
 
 fix_session($opt{'session'}) if $opt{'session'};
 
@@ -85,9 +98,12 @@ sub do_torrent {
 	#check for coerce data
 	$coerce = coercechck(\$tdata, $tfile);
 
-	torrent_check($tdata) or return undef;
+    #check basepath
+    my $chkpath = $opt{'session'} ? $tdata->{'rtorrent'}{'directory'} : $opt{'base'};
 
-    unless ( resume() ) {
+    torrent_check($tdata, $chkpath) or return undef;
+
+    unless ( resume($tdata, 1) ) {
 		print "Something went wrong when resuming $tdata->{'info'}{'name'}\n";
 		print "Try verbose mode to see more info\n" unless $opt{'verbose'};
 		return undef;
@@ -138,10 +154,7 @@ sub fix_session {
 	print "\n====\nProcessing file $torrent\n" if $opt{'verbose'};
 
 
-	load_file($torrent, \$tdata, $coerce);
-	torrent_check($tdata);
-
-	if ( not  $tdata ) { print "WARNING: Can't load $_\n"; next; }
+	unless (load_file($torrent, \$tdata, $coerce)) { print "WARNING: Can't load $_\n"; next; };
 
 	#new version of rtorrent stores its data in separate files
 	unless ( $opt{'old-version'} ) { 
@@ -150,13 +163,15 @@ sub fix_session {
 	    }
 	};
 
+	torrent_check($tdata, $tdata->{'rtorrent'}{'directory'}) or next;
+
         if ( defined $tdata->{'rtorrent'}{'complete'} && $tdata->{'rtorrent'}{'complete'} == 1 ) {
 	    print "This torrent is finished\n" if $opt{'verbose'}; next;
 	}
 
 
 	#try resume this torrent
-	unless ( &resume() ) {
+	unless ( resume($tdata, 1) ) {
 	    print "Something went wrong when resuming $tdata->{'info'}{'name'}\nTry verbose mode to see more info. Moving to next file\n";
 	    next;
 	}
@@ -252,24 +267,22 @@ sub coercechck {
 }
 
 # do base check fot torrent file
+# return INFOHASH on success or undef otherwise
 sub torrent_check {
-	my $data = shift;
+    my ($data, $chkpath) = @_;
 
     unless (ref $data eq "HASH" and exists $data->{'info'}) { print "No info key.\n"; return undef; }
 
     print "Torrent name: $data->{'info'}{'name'}\n" if (defined $data->{'info'}{'name'} && $opt{'verbose'});
 
-	#check basepath
-	my $chkpath = $opt{'session'} ? $tdata->{'rtorrent'}{'directory'} : $opt{'base'};
+    unless ( $chkpath = chk_basedir($chkpath, $data) ) {
+	  print "Torrent base path is wrong, aborting...\n";
+	  return undef;
+    }
 
-	unless ( $chkpath = chk_basedir($chkpath, $data) ) {
-		print "Base path $chkpath is wrong, aborting...\n";
-		return undef;
-	}
-
-	#Set rtorrent directory, we'll need it later
-	$data->{'rtorrent'}{'directory'} = $chkpath unless $opt{'session'};
-	return 1;
+    #Set rtorrent directory, we'll need it later
+    $data->{'rtorrent'}{'directory'} = $chkpath unless $opt{'session'};
+	return uc(sha1_hex(bencode($data->{'info'})));
 }
 
 
@@ -296,7 +309,7 @@ sub getfiles {
 
     $chunks = chunks($tsize,$chunk_size);
     if ($opt{'verbose'}) {print "Total: $tsize bytes; $chunks chunks; ", @files . " files\n";}
-    if ($opt{'verbose'}) {print "Chunks hash length: " . length $t->{'info'}{'pieces'}; print "bytes\n\n";}
+    if ($opt{'verbose'}) {print "Chunks hash length: " . length $t->{'info'}{'pieces'}; print " bytes\n\n";}
 
     unless ( $chunks * CHUNK_HASH_SIZE == length $t->{'info'}{'pieces'} ) { print "Inconsistent chunks hash information!\n"; return undef;}
 
@@ -304,7 +317,11 @@ sub getfiles {
 }
 
 # resume torrent
+# Options:
+# $tdata - reference to a torrent data
 sub resume{
+
+    my ($tdata) = @_;
 
     my $files;
     unless ( $files = getfiles($tdata) ) { print "WARNING: Can't get file list from torrent\n"; return undef; };
@@ -322,12 +339,12 @@ sub resume{
 		my $trnt_length = is_multi($tdata) ? $tdata->{'info'}{'files'}[$_]{'length'} : $tdata->{'info'}{'length'};
 
 		unless ( defined $fstat[7] ) {
-			unless ($opt{'unfinished'}) { die("File: $d${$files}[$_] doesn't exist. Use '--unfinished' to do partial resume\n") };
+			unless (defined $opt{'unfinished'} && $opt{'unfinished'}) { print "File: $d${$files}[$_] doesn't exist. Use '--unfinished' to do partial resume\n"; return 0; };
 			print "Not found $d${$files}[$_]\n" if $opt{'verbose'};
 			$fstat[7] = 0;
 		} elsif ( $trnt_length != $fstat[7] ){
 			print "File: $d${$files}[$_] \non-disk file-size $fstat[7] doesn't match in-torrent size $trnt_length\n" if ($opt{'verbose'} || not $opt{'force'});
-			unless ($opt{'force'}) {die("Aborting resume... Use '--force' to override and reset file to unfinished state")};
+			unless ($opt{'force'}) { print "Aborting resume... Use '--force' to override and reset file to unfinished state\n"; return 0; };
 			print "reseting resume info\n";
 			$fstat[7] = 0;
 		}
@@ -351,7 +368,7 @@ sub resume{
 					make_path($dirpath) or return undef
 				}
 
-				open(FILE,">>$d${$files}[$_]") or die "Can't create file $d${$files}[$_]";
+				open(FILE,">>$d${$files}[$_]") or return undef; #die "Can't create file $d${$files}[$_]";
 				close(FILE);
 
 				#refresh fstat for the new file
@@ -360,9 +377,12 @@ sub resume{
 		}
 
 		$tdata->{'libtorrent_resume'}{'files'}[$_] = {
-			'mtime' => $fstat[9],
-			'completed' => $fstat[7] ? filechunks($boffset, $fstat[7]) : 0
+			'mtime' => $fstat[9] ? $fstat[9] : time,
+			'completed' => $fstat[7] ? filechunks($boffset, $fstat[7]) : 0,
 		};
+
+		#Do not download non-exitent files
+		#unless ($fstat[7] && $make_empty) { $tdata->{'libtorrent_resume'}{'files'}[$_]{'priority'} = 0;  }
 
 		# count real on-disk data size
 		$ondisksize += $fstat[7];
@@ -379,13 +399,21 @@ sub resume{
 		return undef;
     }
 
-    print "\nResume summary for torrent $tdata->{'info'}{'name'}:\n$missing out of $chunks missing\n";
+    print "\nResume summary for torrent $tdata->{'info'}{'name'}:\n$missing out of $chunks chunks missing\n";
 
-    #set some vars in torrent
-    $tdata->{'rtorrent'}{'chunks_wanted'} = $missing;
-    $tdata->{'rtorrent'}{'chunks_done'} = $chunks - $missing;
-    $tdata->{'rtorrent'}{'complete'} = $missing ? 0 : 1;
+	my $rt_data = {
+		'chunks_wanted' => $missing,
+  		'chunks_done' => $chunks - $missing,
+  		'complete' => $missing ? 0 : 1,
+		'timestamp.finished' => $missing ? 0 : time,
+		'timestamp.started' => time,
+		#'state' = 1;	#autostart torrent
+	};
+
+    #set resume vars in torrent
+	$tdata->{'rtorrent'} = { %{$tdata->{'rtorrent'}}, %$rt_data };
     $tdata->{'libtorrent_resume'}{'bitfield'} = $chunks unless ($missing);
+
     return 1;
 }
 
@@ -564,6 +592,93 @@ sub intcleanse {
     }
 }
 
+# dump torrent file structure
+sub tdump {
+  my ($opt, $file) = @_;
+  my $tdata;
+  $debug=1;
+  load_file($file, $tdata, $coerce);
+  exit 0;
+}
+
+# urlenc (solution from webmin libraries)
+sub urlize {
+  my ($rv) = @_;
+  $rv =~ s/([^A-Za-z0-9])/sprintf("%%%2.2X", ord($1))/ge;
+  return $rv;
+}
+
+
+# transmission to rtorrent session converter
+sub t2r {
+    my ($src, $dst) = @_;
+	my $cnt = 0;
+
+    chdir $src or die "Cannot chdir to session directory $src: $!\n";
+
+    my @torrents = glob("torrents/*.torrent");
+
+    foreach ( @torrents ) {
+
+	  my $torrent = $_;
+	  $torrent =~ m#torrents/(.+)\.torrent$#;
+	  my $tr_basename = $1;
+	  my $tr_resume_file = $tr_basename . '.resume';
+	  my $tr_res;	#transmission resume data
+
+	  print "\n====\nProcessing file $torrent\n";
+	  print "Transmission resume file $tr_resume_file\n" if $opt{'verbose'};
+
+	  unless(load_file($torrent, \$tdata, $coerce))  { print "WARNING: Can't load $_\n"; next; };
+	  unless(load_file("resume/$tr_resume_file", \$tr_res, $coerce)) { print "WARNING: Can't load $_\n"; next; };
+
+	  unless ( defined $tr_res->{'progress'}{'have'} && $tr_res->{'progress'}{'have'} =~ m/all/ ) {
+		print "Unfinished torrents is not supported, skip...\n";
+		next;
+	  }
+
+	  # add base dir path
+	  my $infohash = torrent_check($tdata, $tr_res->{'destination'}) or next;
+
+	  unless (resume($tdata, 0)) {
+		print "Resume failed, skip...\n";
+		next;
+	  }
+
+	  my $rt_data = {
+		'state' => $tr_res->{'paused'} ? 0 : 1,
+		#'complete' => defined $tr_res->{'progress'}{'have'} ? 1 :0,
+		'custom' => {'addtime' => $tr_res->{'added-date'} },
+		'timestamp.finished' => $tr_res->{'done-date'},
+		'state_changed' => $tr_res->{'activity-date'},
+		'total_uploaded' => $tr_res->{'uploaded'},
+		'total_downloaded' => $tr_res->{'downloaded'},
+		'custom1' => 'transmission',
+		'hashing' => 0,
+  	  };
+
+	  $tdata->{'rtorrent'} = { %{$tdata->{'rtorrent'}}, %$rt_data };
+	  $tdata->{'rtorrent'}{'custom'}{'x-filename'} = urlize($tr_basename . '.torrent');
+	  $tdata->{'rtorrent'}{'tied_to_file'} = $src . $torrent if $opt{'tied'};
+
+	  my $dst_file = $dst . $infohash . '.torrent';
+	  unless (copy("$torrent", "$dst_file" )) { print "File copy failed, skip\n"; next; }
+	  print "Saving session file: $infohash\n";
+	  $tdata->{'rtorrent'}{'loaded_file'} = $dst_file;
+
+	  #save session file
+	  &savertsession($dst_file);
+	  ++$cnt;
+
+  	  if ( $opt{'remove-source'} ) {
+		unlink $torrent or print "Can't remove file $torrent: $!\n";
+		unlink "resume/$tr_resume_file" or print "Can't remove file resume/$tr_resume_file: $!\n";
+  	  }
+    }
+
+	print "\n===\n===\n$cnt out of " . scalar @torrents . " torrents converted\n";
+
+}
 
 # no code after this mark
 
@@ -588,10 +703,12 @@ This version supports:
  - resuming torrents with missing files (yep, it's nice!)
  - automated rtorrent session files resuming
 
-=head1 OPTIONS
+=head1 USAGE
 
     rfr.pl [options] file ...
     rfr.pl [options] -s|--session <path>
+	rfr.pl [-vdt] --t2r <transmission_session> -d <rtorrent_session>
+	rfr.pl --dump <torrent_file>
 
     Options:
     -b, --base	<path>		Base directory to look for data files
@@ -599,11 +716,14 @@ This version supports:
 				it's stongly advised to redirect STDOUT to a file, so it will not trash you terminal.
 				Specify twice to produce even more debug output, including bitfield vector for each file.
     -d, --destination <path>	destination dir|file to save resumed torrent file
+    --dump				Bdecode and print torrent structure
+    -f, --force			Force actions that could lead to corrupted torrents
     -h, --help	  		brief help message
     --man        		full documentation
     -o, --old-version		use old rtorernt session format with all data in one file (for rtorrent <8.9)
     -r, --remove-source		remove source torrent file if resume was successful
     -s, --session <path>	resume all torrents in rtorrent session directory under <path>
+    -t, --tied				Tie session file to source torrent
     -u, --unfinished		check for missing files and resume partialy downloaded torrent
     -v, --verbose		be more verbose about what's going on there
 
@@ -668,6 +788,16 @@ files for resume data in session dir. I don't remember when this happened exactl
 for  *.rtorrent *.libtorrent_resume files. If those are missing than you must specify --old-version option.
 Don't forget to quit rtorrent first, rfr will refuse to run if it finds rtorrent lock file.
 
+=head1 Convert Transmission session into RTorrent session
+
+If You decided to quit using Transmission and switch to RTorrent but do not want to manually reload and rehash all
+of your torrents one by one. Sure you want to keep as much data as possible, like creation time, UL/DL values,
+autoset destination dir etc? There is a way to convert Transmission session into RTorrent session. Use rfr.pl to
+do this - just provide path to transmission session dir as a source and RTorrent session dir as a destination,
+than reload rtorrent. Only full-finished torrent with valid destination path would be converted, partial seeding
+and incomplete downloads are not supported.
+
+
 			    !!! WARNING !!!
 
 Needless to say how backup of a session dir is important before making resume!!! If anything happens you
@@ -700,6 +830,13 @@ will loose everything!!! You've been warned!
     assume we have rtorren 8.6
 
     ./rfr.pl -vo --session ~/rtorrent/session/
+
+* Load any torrent and dump it's structure to stdout without any checks
+
+	./rfr.pl --dump some.torrent
+
+* Convert Transmission session files into RTorrent session
+	./rfr.pl --t2r ~/transmission/ -d ~/rt/session/
 
 
 Don't forget about the backups anyway!!!
