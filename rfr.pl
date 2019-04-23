@@ -101,7 +101,7 @@ sub do_torrent {
     #check basepath
     my $chkpath = $opt{'session'} ? $tdata->{'rtorrent'}{'directory'} : $opt{'base'};
 
-    torrent_check($tdata, $chkpath) or return undef;
+    my $infohash = torrent_check($tdata, $chkpath) or return undef;
 
     unless ( resume($tdata, 1) ) {
 		print "Something went wrong when resuming $tdata->{'info'}{'name'}\n";
@@ -112,20 +112,36 @@ sub do_torrent {
 	print "Dumping resumed torrent structure:\n" if $debug;
 	print Dumper ($tdata) if $debug;
 
-    # save to the sourse file if destination is not set
-    $opt{'destination'} = $tfile unless $opt{'destination'};
+	if (defined $coerce) {
+      # save to the sourse file if destination is not set
+	  $opt{'destination'} = $tfile unless $opt{'destination'};
 
-    print "Destination - $opt{'destination'}\n";
+  	  print "Destination - $opt{'destination'}\n";
 
-    #I don't care about basename's last element may not be a file
-    # if I was able to load it recently than it must be a file
-    $opt{'destination'} .= basename($tfile) if chkdir(\$opt{'destination'});
-    savetofile( $tdata, $opt{'destination'}, $coerce ) or return undef;
+  	  #I don't care about basename's last element may not be a file
+  	  # if I was able to load it recently than it must be a file
+  	  $opt{'destination'} .= basename($tfile) if chkdir(\$opt{'destination'});
+  	  savetofile( $tdata, $opt{'destination'}, $coerce ) or return undef;
 
-    #hope no one will set -d to the source dir and -r simultaneously :)
-    if ( $opt{'remove-source'} && $opt{'destination'} ne $tfile   ) {
-	unlink $tfile or print "Can't remove sorce file $tfile: $!\n";
-    }
+	} else {
+	##save "fuzzy" torrents via session format
+		$opt{'destination'} = dirname($tfile) unless chkdir(\$opt{'destination'});
+		chkdir(\$opt{'destination'}) or return undef;
+
+		print "Saving session for infohash: $infohash\n";
+		print "Pls copy files prefixed $infohash into rtorrent session dir and restart rtorrent to pick 'em up\n";
+		my $dst_file = $opt{'destination'} . $infohash . '.torrent';
+		unless (copy("$tfile", "$dst_file" )) { print "File copy failed, skip\n"; return undef; }
+
+		#save session file
+		&savertsession($dst_file) or return undef;
+	}
+
+  	#hope no one will set -d to the source dir and -r simultaneously :)
+  	if ( $opt{'remove-source'} && $opt{'destination'} ne $tfile   ) {
+	  unlink $tfile or print "Can't remove sorce file $tfile: $!\n";
+  	}
+
 }
 
 
@@ -254,8 +270,8 @@ sub coercechck {
 
 
 	if ($strasint && $largefile) {
-		# return undef;
-		die("Torrent has filepath with digits-only element AND some file has size over 2Gb\n!!!Resuming such torrents is not supported due to perl scalar handling :(((\n");
+		print "Torrent has filepath with digits-only element AND some file has size over 2Gb\n!!!Resuming such torrents is possible in session mode only due to perl scalar handling :(((\n";
+		return undef;
 	} elsif ($strasint) {
 		print "Torrent has filepath with digits-only, bdecoding without coerce\n" if $opt{'verbose'};
 		#switch global coerce to 0, cause we need to bencode without corce too
@@ -454,7 +470,7 @@ sub savetofile {
 	rtclean($data) unless $coer;
 
     unless ( open(FP, ">$file") ) { print "Could not open file $file for writing:\n $!"; return undef; }
-    print "Saving bencode to file $file with coerce $coerce\n" if $opt{'verbose'};
+    print "Saving bencode to file $file with coerce $coer\n" if $opt{'verbose'};
 
     my $content = bencode($data);
 
@@ -663,7 +679,7 @@ sub t2r {
 
 	  my $dst_file = $dst . $infohash . '.torrent';
 	  unless (copy("$torrent", "$dst_file" )) { print "File copy failed, skip\n"; next; }
-	  print "Saving session file: $infohash\n";
+	  print "Saving session for torrent infohash: $infohash\n";
 	  $tdata->{'rtorrent'}{'loaded_file'} = $dst_file;
 
 	  #save session file
