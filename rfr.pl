@@ -149,9 +149,9 @@ sub fix_session {
     my $dir =  shift;
 
     if ( $opt{'unfinished'}  ) { 
-	print "Sorry, but missing files resuming with session dir is not implemented yet\n";
-	print "Only completed torrents will be resumed\n";
-	$opt{'unfinished'} = 0;
+		print "Sorry, but missing files resuming with session dir is not implemented yet\n";
+		print "Only completed torrents will be resumed\n";
+		$opt{'unfinished'} = 0;
     }
 
     &chkdir(\$dir);
@@ -174,14 +174,12 @@ sub fix_session {
 
 	#new version of rtorrent stores its data in separate files
 	unless ( $opt{'old-version'} ) { 
-	    unless ( load_rtdata($torrent, \$tdata) ) {
-		print "WARNING: Can't load rtorrent data for $_\n"; next;
-	    }
+	    unless ( load_rtdata($torrent, $tdata) ) { print "WARNING: Can't load rtorrent data for $_\n"; next; }
 	};
 
 	torrent_check($tdata, $tdata->{'rtorrent'}{'directory'}) or next;
 
-        if ( defined $tdata->{'rtorrent'}{'complete'} && $tdata->{'rtorrent'}{'complete'} == 1 ) {
+    if ( defined $tdata->{'rtorrent'}{'complete'} && $tdata->{'rtorrent'}{'complete'} == 1 ) {
 	    print "This torrent is finished\n" if $opt{'verbose'}; next;
 	}
 
