@@ -17,11 +17,13 @@ This version supports:
  - processing multiple torrents from one command
  - resuming partially downloaded torrents with missing files (yep, it's nice!)
  - automated rtorrent session files resuming
+ - converting transmission session files to rtorrent session
 
 ### OPTIONS
 
     rfr.pl [options] file ...
     rfr.pl [options] -s|--session <path>
+    rfr.pl --t2r [-t|--tied] <transmission_session_dir> <rtorrent_session_dir>
 
     Options:
     -b, --base	<path>		Base directory to look for data files
@@ -37,6 +39,7 @@ This version supports:
     -u, --unfinished		check for missing files and resume partialy downloaded torrent
     -v, --verbose		be more verbose about what's going on there
     -c, --coerce                serialize (\d+) strings as integers (may corrupt torrents with digits-only directory/file names, like '\dir\123\name\somefile' )
+    --t2r           convert Transmission session to rTorrent session
 
     [file]			torrent file to resume
 
@@ -98,11 +101,20 @@ files for resume data in session dir. I don't remember when this happened exactl
 for  *.rtorrent *.libtorrent_resume files. If those are missing than you must specify --old-version option.
 Don't forget to quit rtorrent first, rfr will refuse to run if it finds rtorrent lock file.
 
+#### Convert Transmission session into RTorrent session
+
+If You decided to quit using Transmission and switch to RTorrent but do not want to manually reload and rehash all
+of your torrents one by one. Sure you want to keep as much data as possible, like creation time, UL/DL values,
+autoset destination dir etc? There is a way to convert Transmission session into RTorrent session. Use `rfr.pl` to
+do this - just provide path to transmission session dir as a source and RTorrent session dir as a destination,
+than reload rtorrent. Only full-finished torrent with valid destination path would be converted, partial seeding
+and incomplete downloads are not supported.
+
+
 			    !!! WARNING !!!
 
 Needless to say how backup of a session dir is important before making resume!!! If anything happens you
 will loose everything!!! You've been warned!
-
 
 ### EXAMPLES
 
