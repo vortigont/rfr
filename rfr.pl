@@ -19,7 +19,7 @@ use Digest::SHA1 qw(sha1_hex);
 
 use constant CHUNK_HASH_SIZE => 20;
 
-my $VERSION = "1.1.0";
+my $VERSION = "1.1.1";
 
 #var for torrent data
 my $tdata;
