@@ -3,7 +3,8 @@
 # Perl script to add rTorrent fast resume data to torrent files.
 #
 # see --help for details
-
+#
+# https://github.com/vortigont/rfr
 
 use warnings;
 use strict;
@@ -861,6 +862,7 @@ Don't forget about the backups anyway!!!
 Emil Muratov <gpm@hotplug.ru> (c) 2012
 
 Based on code rtorrent_fast_resume.pl by Josef Drexler
+https://github.com/rakshasa/rtorrent/blob/master/doc/rtorrent_fast_resume.pl
 http://libtorrent.rakshasa.no/downloads/rtorrent_fast_resume.pl
 
 =head1 COPYRIGHT AND DISCLAIMER

@@ -7,14 +7,15 @@ Perl script to add fast resume data to torrent files used by rtorrent.
 
 This script is intended to add fast resume data to rtorrent, so you don't need to hash-recheck all data if for some reason you are sure that
 your data is exactly the same as referenced in torrent file.
-Initialy it was based on rtorrent_fast_resume.pl by Josef Drexler http://libtorrent.rakshasa.no/downloads/rtorrent_fast_resume.pl
+Initialy it was based on [rtorrent_fast_resume.pl](https://github.com/rakshasa/rtorrent/blob/master/doc/rtorrent_fast_resume.pl
+) by Josef Drexler http://libtorrent.rakshasa.no/downloads/rtorrent_fast_resume.pl
 but later was completely rewriten to add more nice features and options.
 
 This version supports:
 
  - extended command line options processing and features
  - processing multiple torrents from one command
- - resuming torrents with missing files (yep, it's nice!)
+ - resuming partially downloaded torrents with missing files (yep, it's nice!)
  - automated rtorrent session files resuming
 
 ### OPTIONS
@@ -43,7 +44,7 @@ This version supports:
 
 ### Command Line Options, an Usage
 
-ATTENTION! Please make a backup copies of your torrent files before any actions!
+`ATTENTION! Please make a backup copies of your torrent files before executing any actions!`
 
 To resume single torrent file you need to specify at least -b for the base dir and path to the torrent file itself.
 If <path> is specified with -d  (the destination) option, than this path will be used to save resulting torrent file.
@@ -58,21 +59,20 @@ See examples for more info.
 
 #### Resume partialy downloaded torrents
 
-This feature will allow to resume torrents with some files missing from torent. So later you need to download
-only those files missing and don't need to rehash the whole torrent.
-Most usefull case for this is tv-shows downloading when the episodes released one by one. And each time you
+This feature allows to resume patially downloaded torrents when some files are still 100% incomlete. So later you need to download only those files missing and don't need to rehash the whole torrent.
+Most usefull case for this is tv-shows downloading when episodes released one by one. And each time you
 download a new torrent with only one episode added you have to rehash all previous ones. Very annoing when it
 comes to 20 episodes 3Gigs each. Not any more! With -u flag rfr will check if any files from torrent is
-missing in the base dir and will add instructions to rtorrent to download only missing chunks from torrent.
+missing in the base dir and resume all files that are complete already, so rtorrent needs to download only missing chunks later on.
 
-!!!ATTENTION!!!
+`!!!ATTENTION!!!`
 This will work only for missing files! Not for partialy downloaded files!!! All partialy
-downloaded files will be marked as 100% finished if their size is equal to the value specified in torrent.
-So you will never be able to finish you download actually until you rehash you torrent anyway to resume
-partialy downloaded files. This option is ment for resuming disabled, missing or new files only.
+downloaded files will be marked as 100% finished if their size on disk is equal to the value specified in torrent.
+So you will never be able to finish you download actually until you rehash you torrent to resume
+partialy downloaded files. This option should be used for resuming disabled, missing or new files only.
 Don't use it for unfinished torrents with partialy downloaded files!
-When resuming rfr will create zero byte size files for every missing file in the base dir so rtorrent will
-fill them with data later on.
+When resuming rfr will create zero byte size files for every missing file in the base dir so rtorrent 
+fill it with data later on.
 
 See examples for more info how to use it.
 
